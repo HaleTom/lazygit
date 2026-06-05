@@ -14,22 +14,20 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestTerminateProcessGracefullyKillsPagerProcessGroup demonstrates the bug
-// from issue #5675: when lazygit runs a git command via PTY (`Setsid`,
+// TestTerminateProcessGracefullyKillsPagerProcessGroup demonstrates the fix
+// for issue #5675: when lazygit runs a git command via PTY (`Setsid`,
 // creating a new session where child PID = PGID), and git spawns the pager
-// (e.g. less) as a subprocess in the same process group, the current
-// TerminateProcessGracefully only signals the direct child (git), not the
-// process group. Git exits, but the pager survives.
+// (e.g. less) as a subprocess in the same process group,
+// TerminateProcessGracefully now signals the process group so the pager is
+// also terminated.
 //
-// This test simulates that scenario:
+// Test scenario:
 //   - A "git" process in a new process group
 //   - A "pager" subprocess in the same group that ignores SIGTERM
-//   - TerminateProcessGracefully should signal the process group so that
-//     the pager is also terminated
+//   - TerminateProcessGracefully sends SIGTERM to the PID (original behavior)
+//     AND SIGHUP to the process group (so the pager is also killed)
 //
-// EXPECTED: the pager subprocess is dead after TerminateProcessGracefully.
-// CURRENT (buggy): the pager survives because only the direct child PID
-// received SIGTERM.
+// Without the fix, the pager survives as an orphan. With the fix, both die.
 func TestTerminateProcessGracefullyKillsPagerProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "pager.pid")
 
@@ -85,25 +83,66 @@ func TestTerminateProcessGracefullyKillsPagerProcessGroup(t *testing.T) {
 		return
 	}
 
-	// Act: call the current TerminateProcessGracefully.
-	// This sends SIGTERM to the direct child PID (pgid) only, NOT to
-	// the process group. The "git" process exits (it traps SIGTERM),
-	// but the "pager" ignores SIGTERM and survives.
+	// Act: call TerminateProcessGracefully.
+	// The fix sends SIGTERM to the PID (original behavior) AND SIGHUP to the
+	// process group. The "git" process dies from SIGTERM (via trap). The
+	// "pager" ignores SIGTERM but receives SIGHUP from the process-group
+	// signal and dies.
 	err := TerminateProcessGracefully(cmd)
 	assert.NoError(t, err)
 
-	// The "git" process traps SIGTERM and exits immediately. Wait for reaping.
+	// The "git" process exits and is reaped
 	_, err = cmd.Process.Wait()
 	assert.NoError(t, err)
 
-	// Assert: the pager subprocess SHOULD be dead.
+	// Assert: the pager subprocess is dead.
 	// Signal(0) probes process existence: nil = alive, ESRCH = dead.
 	err = syscall.Kill(pagerPid, syscall.Signal(0))
 	assert.ErrorIs(t, err, syscall.ESRCH,
-		"BUG: pager subprocess (PID %d) survived TerminateProcessGracefully. "+
-			"SIGTERM was sent only to the direct child (PID %d), not to the "+
-			"process group (PGID %d). The fix should signal the process group "+
-			"(kill(-pid, SIGHUP/SIGTERM)) and fall back to SIGKILL after a "+
-			"short timeout.",
+		"pager subprocess (PID %d) survived. SIGTERM killed the parent (PID %d), "+
+			"but SIGHUP to the PG (PGID %d) should have killed the pager.",
 		pagerPid, pgid, pgid)
+}
+
+// TestTerminateProcessGracefullyNonPty verifies that for commands started
+// without a separate process group (no PTY, child inherits parent's PGID),
+// the original SIGTERM-to-PID behavior is preserved. The PG signal
+// (kill(-pid, SIGHUP)) returns ESRCH since the PID is not a valid PGID,
+// and that error is safely ignored.
+func TestTerminateProcessGracefullyNonPty(t *testing.T) {
+	cmd := exec.Command("bash", "-c", `
+		trap 'exit 0' SIGTERM
+		while true; do sleep 1; done
+	`)
+
+	assert.NoError(t, cmd.Start())
+
+	// Cleanup: kill the process if the test fails
+	defer func() {
+		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGKILL)
+	}()
+
+	err := TerminateProcessGracefully(cmd)
+	assert.NoError(t, err)
+
+	// Wait for the process to be reaped
+	_, _ = cmd.Process.Wait()
+
+	// Signal(0) probes process existence: nil = alive, ESRCH = dead.
+	err = syscall.Kill(cmd.Process.Pid, syscall.Signal(0))
+	assert.ErrorIs(t, err, syscall.ESRCH,
+		"process should be dead from SIGTERM (non-PTY, no separate PG)")
+}
+
+// TestTerminateProcessGracefullyAlreadyDead verifies that calling
+// TerminateProcessGracefully on a process that has already exited
+// handles the error gracefully — no crash or panic.
+func TestTerminateProcessGracefullyAlreadyDead(t *testing.T) {
+	cmd := exec.Command("bash", "-c", "exit 0")
+	assert.NoError(t, cmd.Start())
+	_, _ = cmd.Process.Wait()
+
+	// Process is already dead — both signals will fail with ESRCH
+	err := TerminateProcessGracefully(cmd)
+	assert.Error(t, err)
 }

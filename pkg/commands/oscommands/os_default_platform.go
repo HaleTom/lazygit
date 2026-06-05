@@ -45,5 +45,20 @@ func TerminateProcessGracefully(cmd *exec.Cmd) error {
 		return nil
 	}
 
-	return cmd.Process.Signal(syscall.SIGTERM)
+	// Preserve original behavior: signal the direct child
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+
+	// Signal the process group to kill subprocesses (e.g. less the pager).
+	// When commands are started via PTY (creack/pty.StartWithSize), Setsid
+	// creates a new session where the child PID is also the process group ID.
+	// Subprocesses like less inherit the same PGID.
+	//
+	// ESRCH means no separate PG exists (non-PTY command) — harmless.
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP); err != nil && err != syscall.ESRCH {
+		return err
+	}
+
+	return nil
 }
