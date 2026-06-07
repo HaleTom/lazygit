@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jesseduffield/lazygit/pkg/commands/oscommands"
@@ -166,19 +167,34 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				// and the user is flicking through a bunch of items.
 				self.throttle = time.Since(startTime) < THROTTLE_TIME && timeToStart > COMMAND_START_THRESHOLD
 
-				// Kill the still-running command. The only reason to do this is to save CPU usage
-				// when flicking through several very long diffs when diff.algorithm = histogram is
-				// being used, in which case multiple git processes continue to calculate expensive
-				// diffs in the background even though they have been stopped already.
-				//
-				// Unfortunately this will do nothing on Windows, so Windows users will have to live
-				// with the higher CPU usage.
+				// Close the pty master first. This triggers the kernel's tty_vhangup()
+				// which sends SIGHUP to the foreground process group (git + less + highlight).
+				// This is what tmux/sshd/screen do — close the pty, let the kernel signal
+				// the group atomically.
+				onDone()
+
+				// Send SIGTERM to the direct child as well, for commands started without a PTY.
 				if err := oscommands.TerminateProcessGracefully(cmd); err != nil {
 					self.Log.Errorf("error when trying to terminate cmd task: %v; Command: %v %v", err, cmd.Path, cmd.Args)
 				}
 
-				// close the task's stdout pipe (or the pty if we're using one) to make the command terminate
-				onDone()
+				// Wait for the process group to exit, with a timeout.
+				done := make(chan struct{})
+				go func() {
+					cmd.Wait()
+					close(done)
+				}()
+				select {
+				case <-done:
+					// Clean exit
+				case <-time.After(500 * time.Millisecond):
+					// SIGHUP didn't work (e.g., less's handler deadlocked).
+					// Force-kill the entire process group.
+					if cmd.Process != nil {
+						_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+					}
+					<-done // Wait for cmd.Wait() to reap the zombie
+				}
 			}
 		})
 
