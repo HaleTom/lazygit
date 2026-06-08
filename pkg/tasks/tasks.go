@@ -28,6 +28,8 @@ const THROTTLE_TIME = time.Millisecond * 30
 // we use this to check if the system is under stress right now. Hopefully this makes sense on other machines
 const COMMAND_START_THRESHOLD = time.Millisecond * 10
 
+const PROCESS_KILL_TIMEOUT = time.Millisecond * 500
+
 type ViewBufferManager struct {
 	// this blocks until the task has been properly stopped
 	stopCurrentTask func()
@@ -151,6 +153,15 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 		cmd, r := start()
 		timeToStart := time.Since(startTime)
 
+		var waitOnce sync.Once
+		var waitErr error
+		waitCmd := func() error {
+			waitOnce.Do(func() {
+				waitErr = cmd.Wait()
+			})
+			return waitErr
+		}
+
 		done := make(chan struct{})
 
 		go utils.Safe(func() {
@@ -166,19 +177,32 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				// and the user is flicking through a bunch of items.
 				self.throttle = time.Since(startTime) < THROTTLE_TIME && timeToStart > COMMAND_START_THRESHOLD
 
-				// Kill the still-running command. The only reason to do this is to save CPU usage
-				// when flicking through several very long diffs when diff.algorithm = histogram is
-				// being used, in which case multiple git processes continue to calculate expensive
-				// diffs in the background even though they have been stopped already.
-				//
-				// Unfortunately this will do nothing on Windows, so Windows users will have to live
-				// with the higher CPU usage.
+				// Close the pty master first. This triggers the kernel's tty_vhangup()
+				// which sends SIGHUP to the foreground process group (git + less + highlight).
+				// This is what tmux/sshd/screen do — close the pty, let the kernel signal
+				// the group atomically.
+				onDone()
+
+				// Send SIGTERM to the direct child as well, for commands started without a PTY.
 				if err := oscommands.TerminateProcessGracefully(cmd); err != nil {
 					self.Log.Errorf("error when trying to terminate cmd task: %v; Command: %v %v", err, cmd.Path, cmd.Args)
 				}
 
-				// close the task's stdout pipe (or the pty if we're using one) to make the command terminate
-				onDone()
+				// Wait for the process group to exit, with a timeout.
+				waitDone := make(chan struct{})
+				go func() {
+					_ = waitCmd()
+					close(waitDone)
+				}()
+				select {
+				case <-waitDone:
+					// Clean exit
+				case <-time.After(PROCESS_KILL_TIMEOUT):
+					// SIGHUP didn't work (e.g., less's handler deadlocked).
+					// Force-kill the process group.
+					killProcessGroup(cmd)
+					<-waitDone // Wait for cmd.Wait() to reap the zombie
+				}
 			}
 		})
 
@@ -309,13 +333,9 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 
 			select {
 			case <-opts.Stop:
-				// If we stopped the task, don't block waiting for it; this could cause a delay if
-				// the process takes a while until it actually terminates. We still want to call
-				// Wait to reclaim any resources, but do it on a background goroutine, and ignore
-				// any errors.
-				go func() { _ = cmd.Wait() }()
+				// goroutine at top of NewCmdTask handles termination
 			default:
-				if err := cmd.Wait(); err != nil {
+				if err := waitCmd(); err != nil {
 					self.Log.Errorf("Unexpected error when running cmd task: %v; Failed command: %v %v", err, cmd.Path, cmd.Args)
 				}
 			}
