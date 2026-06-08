@@ -45,7 +45,9 @@ func TestTerminateProcessGracefullyKillsPagerProcessGroup(t *testing.T) {
 
 	// Start in a new process group, just like PTY.StartWithSize does via Setsid
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	assert.NoError(t, cmd.Start())
+	if !assert.NoError(t, cmd.Start()) {
+		return
+	}
 	if !assert.NotZero(t, cmd.Process.Pid, "process should have a PID") {
 		return
 	}
@@ -162,7 +164,9 @@ func TestCleanupWithTimeoutAndSIGKILL(t *testing.T) {
 	`, pidFile))
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	assert.NoError(t, cmd.Start())
+	if !assert.NoError(t, cmd.Start()) {
+		return
+	}
 	pgid := cmd.Process.Pid
 
 	defer func() {

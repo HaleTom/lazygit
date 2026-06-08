@@ -153,6 +153,15 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 		cmd, r := start()
 		timeToStart := time.Since(startTime)
 
+		var waitOnce sync.Once
+		var waitErr error
+		waitCmd := func() error {
+			waitOnce.Do(func() {
+				waitErr = cmd.Wait()
+			})
+			return waitErr
+		}
+
 		done := make(chan struct{})
 
 		go utils.Safe(func() {
@@ -182,7 +191,7 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				// Wait for the process group to exit, with a timeout.
 				waitDone := make(chan struct{})
 				go func() {
-					cmd.Wait()
+					_ = waitCmd()
 					close(waitDone)
 				}()
 				select {
@@ -326,7 +335,7 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 			case <-opts.Stop:
 				// goroutine at top of NewCmdTask handles termination
 			default:
-				if err := cmd.Wait(); err != nil {
+				if err := waitCmd(); err != nil {
 					self.Log.Errorf("Unexpected error when running cmd task: %v; Failed command: %v %v", err, cmd.Path, cmd.Args)
 				}
 			}
