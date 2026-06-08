@@ -6,7 +6,6 @@ import (
 	"io"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/jesseduffield/lazygit/pkg/commands/oscommands"
@@ -28,6 +27,8 @@ const THROTTLE_TIME = time.Millisecond * 30
 
 // we use this to check if the system is under stress right now. Hopefully this makes sense on other machines
 const COMMAND_START_THRESHOLD = time.Millisecond * 10
+
+const PROCESS_KILL_TIMEOUT = time.Millisecond * 500
 
 type ViewBufferManager struct {
 	// this blocks until the task has been properly stopped
@@ -179,21 +180,19 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				}
 
 				// Wait for the process group to exit, with a timeout.
-				done := make(chan struct{})
+				waitDone := make(chan struct{})
 				go func() {
 					cmd.Wait()
-					close(done)
+					close(waitDone)
 				}()
 				select {
-				case <-done:
+				case <-waitDone:
 					// Clean exit
-				case <-time.After(500 * time.Millisecond):
+				case <-time.After(PROCESS_KILL_TIMEOUT):
 					// SIGHUP didn't work (e.g., less's handler deadlocked).
-					// Force-kill the entire process group.
-					if cmd.Process != nil {
-						_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-					}
-					<-done // Wait for cmd.Wait() to reap the zombie
+					// Force-kill the process group.
+					killProcessGroup(cmd)
+					<-waitDone // Wait for cmd.Wait() to reap the zombie
 				}
 			}
 		})
@@ -325,11 +324,7 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 
 			select {
 			case <-opts.Stop:
-				// If we stopped the task, don't block waiting for it; this could cause a delay if
-				// the process takes a while until it actually terminates. We still want to call
-				// Wait to reclaim any resources, but do it on a background goroutine, and ignore
-				// any errors.
-				go func() { _ = cmd.Wait() }()
+				// goroutine at top of NewCmdTask handles termination
 			default:
 				if err := cmd.Wait(); err != nil {
 					self.Log.Errorf("Unexpected error when running cmd task: %v; Failed command: %v %v", err, cmd.Path, cmd.Args)
