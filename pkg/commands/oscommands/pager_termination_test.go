@@ -17,7 +17,7 @@ import (
 )
 
 // TestTerminateProcessGracefullyKillsPagerProcessGroup demonstrates the bug
-// described in issue #5675: when lazygit runs a git command via PTY (`Setsid`,
+// described in issue #5675: when lazygit runs a git command via PTY (`Setpgid`,
 // creating a new session where child PID = PGID), and git spawns the pager
 // (e.g. less) as a subprocess in the same process group,
 // TerminateProcessGracefully only signals the direct child PID, so the pager
@@ -54,7 +54,8 @@ func TestTerminateProcessGracefullyKillsPagerProcessGroup(t *testing.T) {
 		wait
 	`, pidFile))
 
-	// Start in a new process group, just like PTY.StartWithSize does via Setsid
+	// Start in a new process group (child PID = PGID), simulating what
+	// PTY.StartWithSize achieves via Setsid in the real code path.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	assert.NoError(t, cmd.Start())
 	if !assert.NotZero(t, cmd.Process.Pid, "process should have a PID") {
