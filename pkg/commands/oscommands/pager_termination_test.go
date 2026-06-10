@@ -16,20 +16,22 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestTerminateProcessGracefullyKillsPagerProcessGroup demonstrates the fix
-// for issue #5675: when lazygit runs a git command via PTY (`Setsid`,
+// TestTerminateProcessGracefullyKillsPagerProcessGroup demonstrates the bug
+// described in issue #5675: when lazygit runs a git command via PTY (`Setsid`,
 // creating a new session where child PID = PGID), and git spawns the pager
 // (e.g. less) as a subprocess in the same process group,
-// TerminateProcessGracefully now signals the process group so the pager is
-// also terminated.
+// TerminateProcessGracefully only signals the direct child PID, so the pager
+// is not terminated.
 //
 // Test scenario:
 //   - A "git" process in a new process group
 //   - A "pager" subprocess in the same group that ignores SIGTERM
 //   - TerminateProcessGracefully sends SIGTERM to the PID (original behavior)
-//     AND SIGHUP to the process group (so the pager is also killed)
+//     but does NOT send SIGHUP to the process group
 //
-// Without the fix, the pager survives as an orphan. With the fix, both die.
+// The test asserts the CURRENT (buggy) behavior: the pager survives.
+// The EXPECTED behavior is that TerminateProcessGracefully should also send
+// SIGHUP to the process group, killing the pager.
 func TestTerminateProcessGracefullyKillsPagerProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "pager.pid")
 
@@ -86,23 +88,29 @@ func TestTerminateProcessGracefullyKillsPagerProcessGroup(t *testing.T) {
 	}
 
 	// Act: call TerminateProcessGracefully.
-	// The fix sends SIGTERM to the PID (original behavior) AND SIGHUP to the
-	// process group. The "git" process dies from SIGTERM (via trap). The
-	// "pager" ignores SIGTERM but receives SIGHUP from the process-group
-	// signal and dies.
-	err := TerminateProcessGracefully(cmd)
-	assert.NoError(t, err)
+	// The current code sends SIGTERM to the PID only. The "git" process dies
+	// from SIGTERM (via trap). The "pager" ignores SIGTERM and survives.
+	_ = TerminateProcessGracefully(cmd)
 
 	// The "git" process exits and is reaped
-	_, err = cmd.Process.Wait()
-	assert.NoError(t, err)
+	_, _ = cmd.Process.Wait()
 
-	// Assert: the pager subprocess is dead.
+	// Assert: the pager subprocess is still alive (buggy behavior).
 	// Signal(0) probes process existence: nil = alive, ESRCH = dead.
-	err = syscall.Kill(pagerPid, syscall.Signal(0))
+	/* EXPECTED:
+	// The pager should be dead. TerminateProcessGracefully should send SIGHUP
+	// to the process group, killing the pager even though it ignores SIGTERM.
+	err := syscall.Kill(pagerPid, syscall.Signal(0))
 	assert.ErrorIs(t, err, syscall.ESRCH,
 		"pager subprocess (PID %d) survived. SIGTERM killed the parent (PID %d), "+
 			"but SIGHUP to the PG (PGID %d) should have killed the pager.",
+		pagerPid, pgid, pgid)
+	ACTUAL: */
+	err := syscall.Kill(pagerPid, syscall.Signal(0))
+	assert.NoError(t, err,
+		"BUG: pager (PID %d) should have survived. TerminateProcessGracefully "+
+			"only sends SIGTERM to the direct child (PID %d), not SIGHUP to "+
+			"the process group (PGID %d). The pager ignores SIGTERM and is orphaned.",
 		pagerPid, pgid, pgid)
 }
 
