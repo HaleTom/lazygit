@@ -144,8 +144,5 @@ func TestNewCmdTaskKillsProcessGroupWhenDirectChildExits(t *testing.T) {
 		t.Fatal("task did not stop")
 	}
 
-	/* EXPECTED:
 	assertProcessNotRunning(t, pagerPid)
-	ACTUAL: */
-	assertProcessRunning(t, pagerPid)
 }
