@@ -166,6 +166,9 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				// and the user is flicking through a bunch of items.
 				self.throttle = time.Since(startTime) < THROTTLE_TIME && timeToStart > COMMAND_START_THRESHOLD
 
+				// close the task's stdout pipe (or the pty if we're using one) to make the command terminate
+				onDone()
+
 				// Kill the still-running command. The only reason to do this is to save CPU usage
 				// when flicking through several very long diffs when diff.algorithm = histogram is
 				// being used, in which case multiple git processes continue to calculate expensive
@@ -177,8 +180,13 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 					self.Log.Errorf("error when trying to terminate cmd task: %v; Command: %v %v", err, cmd.Path, cmd.Args)
 				}
 
-				// close the task's stdout pipe (or the pty if we're using one) to make the command terminate
-				onDone()
+				// Give the process group a brief window to exit after SIGTERM, then
+				// send SIGKILL as a fallback so that trapped or stubborn children
+				// never outlive the task.
+				go func() {
+					time.Sleep(500 * time.Millisecond)
+					_ = oscommands.KillProcessGroup(cmd)
+				}()
 			}
 		})
 

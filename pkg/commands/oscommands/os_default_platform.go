@@ -47,3 +47,18 @@ func TerminateProcessGracefully(cmd *exec.Cmd) error {
 
 	return cmd.Process.Signal(syscall.SIGTERM)
 }
+
+// KillProcessGroup sends SIGKILL to the process group that cmd belongs to.
+// If cmd was started with Setpgid, its PID is also the PGID, so -Pid targets
+// the entire group. Otherwise it falls back to killing just the direct child.
+func KillProcessGroup(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return nil
+	}
+
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+
+	return cmd.Process.Kill()
+}
