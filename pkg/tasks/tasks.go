@@ -6,7 +6,6 @@ import (
 	"io"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/jesseduffield/lazygit/pkg/commands/oscommands"
@@ -184,12 +183,10 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				// Give the process group a brief window to exit after SIGTERM, then
 				// send SIGKILL as a fallback so that trapped or stubborn children
 				// never outlive the task.
-				if cmd.Process != nil {
-					go func() {
-						time.Sleep(500 * time.Millisecond)
-						_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-					}()
-				}
+				go func() {
+					time.Sleep(500 * time.Millisecond)
+					_ = oscommands.KillProcessGroup(cmd)
+				}()
 			}
 		})
 
