@@ -320,8 +320,13 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				// If we stopped the task, don't block waiting for it; this could cause a delay if
 				// the process takes a while until it actually terminates. We still want to call
 				// Wait to reclaim any resources, but do it on a background goroutine, and ignore
-				// any errors.
-				go func() { _ = cmd.Wait() }()
+				// any errors. We delay the Wait so that the PID remains reserved as a zombie
+				// until the KillProcessGroup fallback (500ms) has had a chance to run,
+				// preventing PID reuse.
+				go func() {
+					time.Sleep(550 * time.Millisecond)
+					_ = cmd.Wait()
+				}()
 			default:
 				if err := cmd.Wait(); err != nil {
 					self.Log.Errorf("Unexpected error when running cmd task: %v; Failed command: %v %v", err, cmd.Path, cmd.Args)

@@ -52,7 +52,7 @@ func TerminateProcessGracefully(cmd *exec.Cmd) error {
 // If cmd was started with Setpgid, its PID is also the PGID, so -Pid targets
 // the entire group. Otherwise it falls back to killing just the direct child.
 func KillProcessGroup(cmd *exec.Cmd) error {
-	if cmd == nil || cmd.Process == nil {
+	if cmd == nil || cmd.Process == nil || cmd.Process.Pid <= 0 {
 		return nil
 	}
 
