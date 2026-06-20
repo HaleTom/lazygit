@@ -28,3 +28,13 @@ func TerminateProcessGracefully(cmd *exec.Cmd) error {
 	// Signals other than SIGKILL are not supported on Windows
 	return nil
 }
+
+// KillProcessGroup kills the direct child process. Process-group signals are
+// not available on Windows.
+func KillProcessGroup(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil || cmd.Process.Pid <= 0 {
+		return nil
+	}
+
+	return cmd.Process.Kill()
+}

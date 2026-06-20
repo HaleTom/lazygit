@@ -28,6 +28,14 @@ const THROTTLE_TIME = time.Millisecond * 30
 // we use this to check if the system is under stress right now. Hopefully this makes sense on other machines
 const COMMAND_START_THRESHOLD = time.Millisecond * 10
 
+// delay before the SIGKILL fallback fires, giving the process group time to exit
+// after SIGTERM
+const processGroupKillAfter = 500 * time.Millisecond
+
+// delay before cmd.Wait() in the stop path to keep the PID reserved as a zombie
+// until the SIGKILL fallback has run
+const cmdWaitAfter = 550 * time.Millisecond
+
 type ViewBufferManager struct {
 	// this blocks until the task has been properly stopped
 	stopCurrentTask func()
@@ -166,6 +174,9 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				// and the user is flicking through a bunch of items.
 				self.throttle = time.Since(startTime) < THROTTLE_TIME && timeToStart > COMMAND_START_THRESHOLD
 
+				// close the task's stdout pipe (or the pty if we're using one) to make the command terminate
+				onDone()
+
 				// Kill the still-running command. The only reason to do this is to save CPU usage
 				// when flicking through several very long diffs when diff.algorithm = histogram is
 				// being used, in which case multiple git processes continue to calculate expensive
@@ -177,8 +188,13 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 					self.Log.Errorf("error when trying to terminate cmd task: %v; Command: %v %v", err, cmd.Path, cmd.Args)
 				}
 
-				// close the task's stdout pipe (or the pty if we're using one) to make the command terminate
-				onDone()
+				// Give the process group a brief window to exit after SIGTERM, then
+				// send SIGKILL as a fallback so that trapped or stubborn children
+				// never outlive the task.
+				go func() {
+					time.Sleep(processGroupKillAfter)
+					_ = oscommands.KillProcessGroup(cmd)
+				}()
 			}
 		})
 
@@ -312,8 +328,13 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				// If we stopped the task, don't block waiting for it; this could cause a delay if
 				// the process takes a while until it actually terminates. We still want to call
 				// Wait to reclaim any resources, but do it on a background goroutine, and ignore
-				// any errors.
-				go func() { _ = cmd.Wait() }()
+				// any errors. We delay the Wait so that the PID remains reserved as a zombie
+				// until the KillProcessGroup fallback (500ms) has had a chance to run,
+				// preventing PID reuse.
+				go func() {
+					time.Sleep(cmdWaitAfter)
+					_ = cmd.Wait()
+				}()
 			default:
 				if err := cmd.Wait(); err != nil {
 					self.Log.Errorf("Unexpected error when running cmd task: %v; Failed command: %v %v", err, cmd.Path, cmd.Args)
