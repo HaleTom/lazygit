@@ -32,7 +32,7 @@ func TerminateProcessGracefully(cmd *exec.Cmd) error {
 // KillProcessGroup kills the direct child process. Process-group signals are
 // not available on Windows.
 func KillProcessGroup(cmd *exec.Cmd) error {
-	if cmd.Process == nil || cmd.ProcessState != nil {
+	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
 
