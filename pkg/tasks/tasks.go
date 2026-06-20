@@ -28,6 +28,14 @@ const THROTTLE_TIME = time.Millisecond * 30
 // we use this to check if the system is under stress right now. Hopefully this makes sense on other machines
 const COMMAND_START_THRESHOLD = time.Millisecond * 10
 
+// delay before the SIGKILL fallback fires, giving the process group time to exit
+// after SIGTERM
+const processGroupKillAfter = 500 * time.Millisecond
+
+// delay before cmd.Wait() in the stop path to keep the PID reserved as a zombie
+// until the SIGKILL fallback has run
+const cmdWaitAfter = 550 * time.Millisecond
+
 type ViewBufferManager struct {
 	// this blocks until the task has been properly stopped
 	stopCurrentTask func()
@@ -184,7 +192,7 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				// send SIGKILL as a fallback so that trapped or stubborn children
 				// never outlive the task.
 				go func() {
-					time.Sleep(500 * time.Millisecond)
+					time.Sleep(processGroupKillAfter)
 					_ = oscommands.KillProcessGroup(cmd)
 				}()
 			}
@@ -324,7 +332,7 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 				// until the KillProcessGroup fallback (500ms) has had a chance to run,
 				// preventing PID reuse.
 				go func() {
-					time.Sleep(550 * time.Millisecond)
+					time.Sleep(cmdWaitAfter)
 					_ = cmd.Wait()
 				}()
 			default:
