@@ -107,10 +107,9 @@ func TestNewCmdTaskKillsProcessGroupWhenDirectChildExits(t *testing.T) {
 
 		(
 			trap '' SIGHUP SIGTERM SIGINT
+			echo $BASHPID > %s
 			while true; do sleep 1; done
 		) &
-		pager_pid=$!
-		echo $pager_pid > %s
 		wait
 	`, pidFile))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
